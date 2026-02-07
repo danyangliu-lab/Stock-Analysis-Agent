@@ -1,6 +1,8 @@
-# 智能股票推荐 Agent 系统
+# 智能股票推荐 Agent 系统 v2.0
 
 基于 Python 的智能股票推荐 Agent，覆盖 **美股**、**港股** 和 **A股** 三大市场。系统通过技术指标分析与基本面评估相结合的多维评分模型，自动筛选优质标的并生成推荐报告。
+
+**v2.0 新增 Streamlit Web 图形界面**，采用 **Apple HIG 设计风格**（毛玻璃效果、渐变光晕背景、CSS 变量驱动的亮/暗色自适应主题），支持常驻运行，提供批量分析、单股详细分析、市场概览仪表盘等可视化功能，同时保留完整的命令行操作方式。
 
 支持动态获取指数成分股（S&P500、NASDAQ100、恒生指数、恒生科技、沪深300、创业板、科创板），并内置 **中概股**（40只，市值>50亿美元）和 **AI 概念股**（81只，芯片/存储/数据中心/应用/能源等全产业链）专题股票池。
 
@@ -9,6 +11,7 @@
 ## 目录
 
 - [系统架构](#系统架构)
+- [v2.0 Web 图形界面](#v20-web-图形界面)
 - [模块详解](#模块详解)
 - [股票池覆盖范围](#股票池覆盖范围)
 - [评分模型详解](#评分模型详解)
@@ -27,9 +30,9 @@
 
 ```
 demo-agent/
+├── app.py                               # Streamlit Web UI 入口 (v2.0 新增)
 ├── main.py                              # 命令行主入口
 ├── requirements.txt                     # Python 依赖
-├── .env.example                         # 环境变量示例
 ├── .gitignore                           # Git 忽略规则
 └── stock_agent/                         # 核心包
     ├── __init__.py                      # 包初始化
@@ -46,20 +49,90 @@ demo-agent/
 ### 数据流向
 
 ```
-                                                                   ┌───────────────┐
- ┌────────────────────┐    ┌──────────────┐    ┌───────────────┐   │               │
- │  IndexConstituents │    │  DataProvider │    │StrategyEngine │   │Recommendation │
- │  (Wikipedia+缓存)  │───>│  (yfinance)  │───>│  综合评分+筛选 │──>│  报告输出      │
- │  · S&P500          │    │  行情+基本面  │    │               │   │               │
- │  · NASDAQ100       │    └──────┬───────┘    │  ┌───────────┐│   │  · 终端表格    │
- │  · 恒生/恒生科技    │           │            │  │ Technical ││   │  · JSON       │
- │  · 沪深300/创科     │           │            │  │ Analyzer  ││   │  · Dict       │
- │  · 中概股(40只)     │           └───────────>│  ├───────────┤│   └───────────────┘
- │  · AI概念(81只)     │                        │  │Fundamental││
- └────────────────────┘                        │  │ Analyzer  ││
-                                               │  └───────────┘│
-         AgentConfig ─── (三市场差异化配置) ────>│               │
-                                               └───────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  StockAgent (Main Controller)                                      │
+│                                                                    │
+│  AgentConfig                                                       │
+│    MarketConfig      stock pool + dynamic/static mode              │
+│    ScoringWeights    US 35:65 / HK 30:70 / CN 40:60                │
+│    ThresholdConfig   filters + market thresholds                   │
+└──────────────────────────────────┬─────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  (1) IndexConstituents                                             │
+│                                                                    │
+│  Dynamic: Wikipedia -> JSON cache (24h TTL)                        │
+│                                                                    │
+│    US 700+          HK 100+         CN 500+                        │
+│    S&P500           Hang Seng        CSI300                        │
+│    NASDAQ100        Hang Seng Tech   ChiNext                       │
+│    Chinese ADR x40                   STAR Market                   │
+│    AI Sector   x81                   (cap >= 10B CNY)              │
+│                                                                    │
+│  Fallback: US 65 / HK 40 / CN 35                                   │
+└──────────────────────────────────┬─────────────────────────────────┘
+                                   │ symbols[]
+                                   ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  (2) DataProvider (yfinance)                                       │
+│                                                                    │
+│    per-stock request, 0.3s interval                                │
+│    OHLCV history (120 cal days ~ 80 trading days)                  │
+│    fundamentals via .info dict                                     │
+│    retry x2, linear backoff                                        │
+│    in-memory cache, 1h TTL                                         │
+│                                                                    │
+│  Output: dict[symbol -> StockData]                                 │
+└─────────────────┬────────────────────────────────┬─────────────────┘
+                  │                                │
+                  ▼                                ▼
+┌─────────────────────────────────┐  ┌─────────────────────────────────┐
+│ (3) TechnicalAnalyzer           │  │ (4) FundamentalAnalyzer         │
+│                                 │  │                                 │
+│ 5 indicators (0-100)            │  │ 10 metrics (0-100)              │
+│   MA trend                      │  │   PE / PB / ROE                 │
+│   RSI (14d)                     │  │   Revenue & Earnings grw        │
+│   MACD                          │  │   Profit margin / FCF           │
+│   Bollinger Bands               │  │   Debt ratio / PEG              │
+│   Volume trend                  │  │   Dividend (HK only)            │
+│                                 │  │                                 │
+│ Weighted by market              │  │ Weighted by market              │
+│ -> technical score              │  │ + growth deep analysis          │
+│ -> signal list                  │  │ -> fundamental score            │
+└────────────────┬────────────────┘  └────────────────┬────────────────┘
+                 │                                  │
+                 └────────────────┬─────────────────┘
+                                  │
+                                  ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  (5) StrategyEngine                                                │
+│                                                                    │
+│  score = tech x weight + fund x weight  (cap 100)                  │
+│                                                                    │
+│    >=80  Strong Buy  +++                                           │
+│    >=65  Buy         ++                                            │
+│    >=50  Hold        +                                             │
+│     <50  Avoid       -                                             │
+│                                                                    │
+│  Filter: score >= min_score, top max_count                         │
+│  Auto-generate recommendation reasons                              │
+└──────────────────────────────────┬─────────────────────────────────┘
+                                   │ recommendations[] + all_evaluations[]
+                                   ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  (6) Output                                                        │
+│                                                                    │
+│  ┌────────────────────────────┐    ┌────────────────────────────┐  │
+│  │ RecommendationReporter     │    │ Streamlit Web UI           │  │
+│  │ (CLI)                      │    │ (v2.0 Apple HIG)           │  │
+│  │                            │    │                            │  │
+│  │   Terminal table           │    │   Batch dashboard          │  │
+│  │   JSON output              │    │   Single stock detail      │  │
+│  │   Python dict              │    │   Market overview          │  │
+│  └────────────────────────────┘    └────────────────────────────┘  │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 完整执行流程
@@ -105,7 +178,91 @@ demo-agent/
    ├── 终端表格报告: 推荐列表 + 理由详情 + 关键指标 + 全市场概览
    ├── JSON 结构化输出: 完整评估数据，含 metrics/growth_profile/technical_indicators
    └── Python 字典: list[dict] 格式供程序内部消费
+
+7. Web 图形界面 (app.py, v2.0 新增)
+   ├── Apple HIG 设计: 毛玻璃效果、渐变光晕背景、CSS 变量亮/暗色自适应
+   ├── 直接调用 StockAgent.run() 和 analyze_single() 接口
+   ├── 批量分析: 市场概览仪表盘 + 推荐排名表 + 理由详情卡片
+   ├── 单股分析: 评分圆环 + 技术面/基本面子评分 + 成长性分析
+   └── 状态管理: st.session_state 保持结果，支持常驻运行
 ```
+
+---
+
+## v2.0 Web 图形界面
+
+v2.0 新增基于 **Streamlit** 的 Web 图形界面，采用 **Apple Human Interface Guidelines (HIG)** 设计风格，支持常驻运行，浏览器中即可操作全部分析功能。
+
+### 设计风格
+
+- **字体**: Inter（SF Pro 的 Web 替代方案）+ -apple-system 系统回退链
+- **毛玻璃效果**: 侧边栏、顶部导航栏采用 `backdrop-filter: saturate(180%) blur(20px)` 磨砂半透明
+- **圆角卡片**: 16-20px 圆角矩形，悬停上浮 2px + 阴影加深动画
+- **渐变光晕背景**: 蓝色（右上）、绿色（左下）、橙色（右中）三色 `radial-gradient`，30s 缓慢漂移动画；底层 60px 网格纹理增加空间感
+- **亮/暗色自适应**: 全部颜色通过 CSS 变量（`--text-primary`、`--bg-card`、`--border-color` 等）定义，暗色模式通过 `@media (prefers-color-scheme: dark)` 和 Streamlit `[data-theme="dark"]` 双重检测自动切换
+- **配色方案**: Apple 系统色——蓝 `#007AFF`、红 `#FF3B30`、橙 `#FF9500`、绿 `#34C759`、灰 `#8E8E93`
+- **响应式**: 桌面端 `max-width: 1200px` 居中，移动端自动缩小间距和字号
+
+### 启动方式
+
+```bash
+# 推荐方式
+python3 -m streamlit run app.py
+
+# 或（如果 streamlit 已在 PATH 中）
+streamlit run app.py
+```
+
+默认在 `http://localhost:8501` 启动，浏览器自动打开。
+
+### 功能概览
+
+`app.py` 实现了两个主要页面，通过侧边栏切换：
+
+#### 页面一：批量分析
+
+| 区域 | 功能 |
+|------|------|
+| **侧边栏配置** | 市场选择（全部/美股/港股/A股）、自定义股票代码、动态成分股开关、最低推荐分数、最大推荐数量 |
+| **概览指标** | 4 个毛玻璃指标卡片：分析股票数、有效数据、推荐股票数、分析耗时（悬停上浮动效） |
+| **市场概览仪表盘** | 按市场分栏展示：股票数量、平均分、最高分（颜色标识）、推荐等级分布条、成长标签分布 |
+| **推荐排名表** | 带进度条可视化的排名表格，展示综合分/技术分/基本面分/成长标签/推荐等级 |
+| **推荐理由详情** | 可展开的圆角卡片式详情（前 3 名默认展开），含评分圆环、推荐/成长标签、关键财务指标（PE/ROE/营收增速/盈利增速/PEG）和推荐理由信号列表 |
+| **全市场评分一览** | 可展开的完整股票表格，支持按市场筛选和按评分排序 |
+
+#### 页面二：单股详细分析
+
+| 区域 | 功能 |
+|------|------|
+| **头部信息** | 毛玻璃卡片：股票代码、公司名称、市场、行业、推荐等级标签（颜色标识）、评分圆环 |
+| **评分概览** | 4 个指标卡片：综合评分、技术面评分、基本面评分、成长加分 |
+| **技术面分析** | 5 个技术指标子评分（MA/RSI/MACD/布林带/成交量）+ 指标数值 + 技术信号列表 |
+| **基本面分析** | 各基本面指标子评分 + 关键财务指标（PE/PB/ROE/营收增速/盈利增速/利润率/负债率/PEG/股息率）+ 成长性分析 + 基本面信号 |
+| **推荐理由** | 综合推荐理由汇总 |
+
+### 界面与命令行对比
+
+| 维度 | 命令行 (`main.py`) | Web UI (`app.py`) |
+|------|--------------------|--------------------|
+| 启动方式 | `python main.py` | `python3 -m streamlit run app.py` |
+| 交互方式 | 参数输入，一次性运行 | 浏览器操作，常驻运行 |
+| 参数配置 | 命令行参数 `--market`、`--min-score` 等 | 侧边栏滑块、下拉框、输入框 |
+| 结果展示 | 终端文本表格 / JSON | Apple 风格可视化：毛玻璃卡片 + 评分圆环 + 进度条表格 + 可展开详情 |
+| 市场概览 | 文本汇总 | 分栏仪表盘（推荐分布/成长分布） |
+| 单股分析 | `--single NVDA` | 独立页面，完整技术面+基本面子评分 |
+| 适用场景 | 脚本自动化、CI/CD、数据管道 | 日常查看、交互式探索 |
+
+### 技术实现
+
+- **Apple HIG 设计**: 全局 CSS 采用 Inter 字体 + Apple 系统色，毛玻璃侧边栏/导航栏（`backdrop-filter`），圆角卡片悬停动效（`translateY(-2px)`），评分圆环和彩色推荐/成长标签
+- **亮暗色自适应**: 所有颜色通过 CSS 变量定义（`--text-primary`、`--bg-card`、`--border-color` 等），暗色模式通过 `@media (prefers-color-scheme: dark)` + Streamlit `[data-theme="dark"]` 双重检测自动切换，内联 HTML 样式同样使用 `var()` 引用
+- **背景装饰**: 使用 `.stApp::before` 伪元素绘制三色渐变光晕（蓝/绿/橙 `radial-gradient`，30s 漂移动画）+ `.stApp::after` 绘制 60px 网格纹理，不受 Streamlit DOM 容器裁剪
+- **状态管理**: 使用 `st.session_state` 保存分析结果、页面状态和分析耗时，页面刷新不丢失已有结果
+- **按钮触发**: 通过 `st.session_state` key 传递按钮状态，避免变量作用域问题
+- **数据复用**: Web UI 直接调用 `StockAgent` 的 `run()` 和 `analyze_single()` 接口，与命令行共享全部后端逻辑
+- **进度提示**: 分析过程使用 `st.spinner` 显示加载状态
+- **表格渲染**: 使用 `st.dataframe` + `st.column_config.ProgressColumn` 实现评分进度条可视化
+- **隐藏默认元素**: 通过 CSS 隐藏 Streamlit 默认的 Deploy 按钮、汉堡菜单和页脚，兼容多个 Streamlit 版本
 
 ---
 
@@ -672,16 +829,34 @@ pip install -r requirements.txt
 ### 运行
 
 ```bash
-# 分析全部美股+港股+A股
+# 方式一: Web 图形界面 (v2.0 推荐)
+python3 -m streamlit run app.py
+
+# 方式二: 命令行分析全部美股+港股+A股
 python main.py
 
-# 查看帮助
+# 查看命令行帮助
 python main.py --help
 ```
 
 ---
 
 ## 使用方式
+
+### Web 图形界面 (v2.0 新增)
+
+```bash
+# 启动 Web UI
+python3 -m streamlit run app.py
+```
+
+浏览器打开 `http://localhost:8501` 后：
+
+1. **批量分析**: 左侧选择市场 → 调整参数 → 点击"开始批量分析"
+2. **单股分析**: 左侧切换到"单股分析" → 输入股票代码（如 `NVDA`、`0700.HK`、`600519.SS`）→ 点击"开始分析"
+3. **自定义代码**: 在"自定义股票代码"文本框中输入，每行一个代码，优先级高于市场选择
+
+Web UI 支持常驻运行，分析结果保留在页面中，可随时调整参数重新分析。
 
 ### 命令行参数
 
